@@ -14,10 +14,41 @@ from PIL import Image
 from pypdf import PdfWriter, PdfReader
 from io import BytesIO
 
+import sys
+
 try:
     import pypdfium2 as pdfium
 except ImportError:
     pdfium = None
+
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "daemon.log")
+
+
+class TeeLogger:
+    def __init__(self, filename, stream):
+        self.filename = filename
+        self.stream = stream
+
+    def write(self, message):
+        self.stream.write(message)
+        stripped = message.strip()
+        if stripped:
+            try:
+                with open(self.filename, "a", encoding="utf-8") as f:
+                    timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+                    if not stripped.startswith("[20"):
+                        f.write(f"[{timestamp}] [COMPILER] {stripped}\n")
+                    else:
+                        f.write(f"{stripped}\n")
+            except Exception:
+                pass
+
+    def flush(self):
+        self.stream.flush()
+
+
+sys.stdout = TeeLogger(LOG_FILE, sys.stdout)
+sys.stderr = TeeLogger(LOG_FILE, sys.stderr)
 
 INBOX_DIR = r"G:\My Drive\Life_OS\00_INBOX\_INBOX_SCANS"
 PROCESSED_DIR = r"G:\My Drive\Life_OS\00_INBOX\Processed"
