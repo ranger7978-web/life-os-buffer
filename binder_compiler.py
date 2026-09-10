@@ -50,11 +50,18 @@ class TeeLogger:
 sys.stdout = TeeLogger(LOG_FILE, sys.stdout)
 sys.stderr = TeeLogger(LOG_FILE, sys.stderr)
 
+from reportlab.lib.pagesizes import A5
+from reportlab.lib.units import mm
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+
 INBOX_DIR = r"G:\My Drive\Life_OS\00_INBOX\_INBOX_SCANS"
 PROCESSED_DIR = r"G:\My Drive\Life_OS\00_INBOX\Processed"
 OUTPUT_DIR = r"G:\My Drive\Life_OS\01_ACADEMIC_ENGINE\Subjects"
+READY_TO_PRINT_DIR = r"G:\My Drive\Life_OS\01_ACADEMIC_ENGINE\Ready_to_Print"
 STATE_FILE = r"G:\My Drive\Life_OS\04_SYSTEM_CONFIG\page_state.json"
 
+PAGE_WIDTH, PAGE_HEIGHT = A5  # 148 x 210 mm
 SUPPORTED_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.pdf')
 PUNCH_MARGIN_MM = 30
 DPI = 300
@@ -268,15 +275,86 @@ def enhance_and_deskew(image_input):
     return 255 - cv2.absdiff(final_img, bg_img)
 
 
-def inject_margins(processed_img, is_odd_page):
-    h, w = processed_img.shape
-    new_w = w + MARGIN_PIXELS
-    canvas = np.full((h, new_w), 255, dtype=np.uint8)
-    if is_odd_page:
-        canvas[:, MARGIN_PIXELS:] = processed_img
-    else:
-        canvas[:, :w] = processed_img
-    return Image.fromarray(canvas)
+def compile_a5_binder_document(pages, subject, clean_title, date, output_path):
+    """
+    Compiles scan pages into a standard A5 PDF with strict binder rules:
+    - Target Canvas: Standard A5 (148 x 210 mm)
+    - Alternating Gutter:
+        * Odd pages (Recto): 15mm left inner margin, 8mm right margin
+        * Even pages (Verso): 8mm left margin, 15mm right inner margin
+    - Top margin: 12mm (includes running header space and 0.5pt rule)
+    - Bottom margin: 10mm (includes running footer space)
+    - Header: Document title, detected subject, and ISO date with 0.5pt rule underneath
+    - Footer: Dynamic 'Page X of Y' on outer margin
+    - Image Scaling: Proportionally scaled to maximum bounds of printable box, preserving aspect ratio
+    """
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    c = canvas.Canvas(output_path, pagesize=A5)
+    total_pages = len(pages)
+    iso_date = str(date).strip() if (date and str(date).strip()) else time.strftime("%Y-%m-%d")
+
+    for idx, page_input in enumerate(pages, start=1):
+        is_odd = (idx % 2 != 0)
+        x_left = 15 * mm if is_odd else 8 * mm
+        x_right = PAGE_WIDTH - (8 * mm if is_odd else 15 * mm)
+        box_w = x_right - x_left  # 125 mm
+        box_bottom = 10 * mm + 1.5 * mm
+        box_top = PAGE_HEIGHT - 12 * mm - 1.5 * mm
+        box_h = box_top - box_bottom
+
+        # 1. Clean & enhance scan
+        enhanced_np = enhance_and_deskew(page_input)
+        enhanced_pil = Image.fromarray(enhanced_np).convert("RGB")
+        img_w, img_h = enhanced_pil.size
+
+        # 2. Proportionally scale scan to printable box bounds
+        scale = min(box_w / img_w, box_h / img_h)
+        draw_w = img_w * scale
+        draw_h = img_h * scale
+        draw_x = x_left + (box_w - draw_w) / 2.0
+        draw_y = box_bottom + (box_h - draw_h) / 2.0
+
+        c.drawImage(ImageReader(enhanced_pil), draw_x, draw_y, width=draw_w, height=draw_h)
+
+        # 3. Running Header: Document title, detected subject, and ISO date
+        c.setFont("Helvetica-Bold", 8)
+        c.setFillColorRGB(0.1, 0.1, 0.1)
+        header_title = f"{subject} - {clean_title}"
+        max_title_w = box_w - 60 * mm
+        if c.stringWidth(header_title, "Helvetica-Bold", 8) > max_title_w:
+            while len(header_title) > 5 and c.stringWidth(header_title + "...", "Helvetica-Bold", 8) > max_title_w:
+                header_title = header_title[:-1]
+            header_title += "..."
+
+        header_y = PAGE_HEIGHT - 8.5 * mm
+        c.drawString(x_left, header_y, header_title)
+
+        c.setFont("Helvetica", 8)
+        c.setFillColorRGB(0.2, 0.2, 0.2)
+        c.drawRightString(x_right, header_y, iso_date)
+
+        # 0.5pt rule underneath header
+        c.setLineWidth(0.5)
+        c.setStrokeColorRGB(0.2, 0.2, 0.2)
+        rule_y = PAGE_HEIGHT - 12 * mm
+        c.line(x_left, rule_y, x_right, rule_y)
+
+        # 4. Running Footer: dynamic 'Page X of Y' on outer margin
+        c.setFont("Helvetica", 8)
+        c.setFillColorRGB(0.2, 0.2, 0.2)
+        page_str = f"Page {idx} of {total_pages}"
+        footer_y = 4.5 * mm
+        if is_odd:
+            # Odd pages (Recto): outer margin is the right margin
+            c.drawRightString(x_right, footer_y, page_str)
+        else:
+            # Even pages (Verso): outer margin is the left margin
+            c.drawString(x_left, footer_y, page_str)
+
+        c.showPage()
+
+    c.save()
+    return output_path
 
 
 def move_to_processed(filepath, filename, subject=None):
@@ -341,47 +419,59 @@ def process_scans():
             clean_base = sanitize_folder_name(os.path.splitext(filename)[0])
             subject, clean_title, date = "General", clean_base, ""
 
-        subject_dir = os.path.join(OUTPUT_DIR, subject, "Compiled_Binder")
-        os.makedirs(subject_dir, exist_ok=True)
-        master_pdf = os.path.join(subject_dir, f"{subject}_Notebook_Q1.pdf")
-
-        start_page = state.get(subject, 1)
-        current_page = start_page
+        # 1. Output Routing: Save final compiled A5 PDF to Ready_to_Print
+        os.makedirs(READY_TO_PRINT_DIR, exist_ok=True)
+        ready_pdf_filename = f"{subject} - {clean_title}.pdf"
+        ready_pdf_path = os.path.join(READY_TO_PRINT_DIR, ready_pdf_filename)
 
         try:
-            writer = PdfWriter()
-            if os.path.exists(master_pdf):
-                with open(master_pdf, 'rb') as f_in:
-                    existing_bytes = BytesIO(f_in.read())
-                reader = PdfReader(existing_bytes)
-                for p in reader.pages:
-                    writer.add_page(p)
+            compile_a5_binder_document(pages, subject, clean_title, date, ready_pdf_path)
 
-            for page_img in pages:
-                is_odd = (current_page % 2) != 0
-                cleaned = enhance_and_deskew(page_img)
-                final_page = inject_margins(cleaned, is_odd_page=is_odd)
+            # 2. Subject Archive Routing: Keep subject archives organized in 01_ACADEMIC_ENGINE\\Subjects\\<Subject>\\
+            subject_dir = os.path.join(OUTPUT_DIR, subject)
+            os.makedirs(subject_dir, exist_ok=True)
+            subject_archive_pdf = os.path.join(subject_dir, ready_pdf_filename)
+            shutil.copy2(ready_pdf_path, subject_archive_pdf)
 
-                pdf_bytes = BytesIO()
-                final_page.save(pdf_bytes, format='PDF', resolution=DPI)
-                pdf_bytes.seek(0)
+            # Also maintain master cumulative notebook in Subjects/<Subject>/Compiled_Binder/<Subject>_Notebook_Q1.pdf
+            binder_dir = os.path.join(subject_dir, "Compiled_Binder")
+            os.makedirs(binder_dir, exist_ok=True)
+            master_pdf = os.path.join(binder_dir, f"{subject}_Notebook_Q1.pdf")
 
-                writer.add_page(PdfReader(pdf_bytes).pages[0])
-                current_page += 1
+            start_page = state.get(subject, 1)
+            current_page = start_page
 
-            with open(master_pdf, 'wb') as f_out:
-                writer.write(f_out)
+            try:
+                writer = PdfWriter()
+                if os.path.exists(master_pdf):
+                    with open(master_pdf, 'rb') as f_in:
+                        existing_bytes = BytesIO(f_in.read())
+                    reader = PdfReader(existing_bytes)
+                    for p in reader.pages:
+                        writer.add_page(p)
 
-            state[subject] = current_page
-            save_state(state)
+                with open(ready_pdf_path, 'rb') as f_ready:
+                    ready_reader = PdfReader(BytesIO(f_ready.read()))
+                    for p in ready_reader.pages:
+                        writer.add_page(p)
+                        current_page += 1
 
+                with open(master_pdf, 'wb') as f_out:
+                    writer.write(f_out)
+
+                state[subject] = current_page
+                save_state(state)
+            except Exception as e:
+                print(f"Notice: Failed updating cumulative binder {master_pdf}: {e}")
+
+            # 3. Archive raw scan and move from INBOX to Processed
             dest = move_to_processed(filepath, filename, subject=subject)
 
             num_pages = len(pages)
             page_desc = f"page {start_page}" if num_pages == 1 else f"pages {start_page}-{current_page - 1}"
             print(
                 f"Processed: {filename} ({num_pages} page{'s' if num_pages > 1 else ''}) -> "
-                f"{subject} / {clean_title or 'Untitled'} ({page_desc}) -> Moved to {dest}"
+                f"Ready_to_Print: {ready_pdf_filename} & Subject Archive ({page_desc}) -> Moved to {dest}"
             )
         except Exception as e:
             print(f"Error compiling {filename}: {e}")
