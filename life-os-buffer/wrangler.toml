@@ -1,0 +1,16 @@
+name = "life-os-buffer"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[[kv_namespaces]]
+binding = "IDEMPOTENCY_KV"
+id = "72b38d80a782444aaa6f9410d4f7eda4"
+
+[vars]
+SPREADSHEET_ID = "1QfPPf0ikte0wFVmjzXIfpLCwMjjDts0iFQkuHCUPG-M"
+GEMINI_MODEL = "gemini-3.7-flash"
+AMBAGAN_SHEET_ID = "1ACJYKldzq0DHsJwIkiocez_xV1egGNiOfAbD-VLuPoY"
+STAKEHOLDER_SHEET_ID = "1uY6-W3pu-IN7CTWsD5bGUOauoBwwPwzITbGz6uzW_5g"
+
+[ai]
+binding = "AI"

@@ -1,0 +1,3 @@
+@echo off
+echo Requesting Administrator privileges to register LifeOS_ThinkPad_Janitor...
+powershell -Command "Start-Process powershell -Verb RunAs -ArgumentList '-NoExit -ExecutionPolicy Bypass -File \"%~dp0register_janitor_task.ps1\"'"
